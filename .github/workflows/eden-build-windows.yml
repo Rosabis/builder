@@ -3,11 +3,13 @@
 # 使用：把本文件放到你的仓库 .github/workflows/ 目录下（文件名随意，例如 build-windows.yml），
 #       然后在 GitHub Actions 页面手动触发（workflow_dispatch）或按下方触发条件自动运行。
 #
-# 说明：
-#  - Eden 是 yuzu 系模拟器，Windows 采用 MSVC + Ninja 编译，依赖 Qt6（GUI）与 vcpkg/CPM 拉取的第三方库。
-#  - 本工作流在 GitHub 托管的 windows-2022 runner 上自动安装 Qt 6.9.0（含 windeployqt），无需自备环境。
-#  - 完整编译较慢（通常 1~2 小时），已设 6 小时超时；公开仓库的免费额度足够单次运行。
-#  - 产物为 zip，包含 eden.exe 及其 Qt/运行时依赖，可直接解压运行。
+# 设计：直接复用 Eden 官方 CI 脚本（.ci/windows/build.sh + package.sh + install-vulkan-sdk.ps1），
+#       仅在此之上自动安装 GitHub runner 缺省的工具链（Ninja / Qt6 / Vulkan SDK / MSVC / Python）。
+#       这样能正确覆盖 Deps.md 的全部 Windows 依赖（含 Vulkan SDK 与 libusb）。
+#
+# 注意：
+#  - 完整编译较慢（首次 1~3 小时，取决于 CPM/vcpkg 依赖下载），已设 6 小时超时。
+#  - 产物为 zip，含 eden.exe + Qt/运行时依赖，可直接解压运行。
 
 name: Build Eden (Windows)
 
@@ -28,10 +30,9 @@ jobs:
     runs-on: windows-2022
     timeout-minutes: 360
     env:
-      # ccache（可选）：如需加速重复构建，把 USE_CCACHE 设为 true 并保留下方 cache 步骤
+      # ccache（可选）：如需加速重复构建，把 USE_CCACHE 设为 true
       USE_CCACHE: "false"
-      # 注意：job 级 env 只允许 github/secrets/vars/needs/inputs/matrix/env 上下文，
-      #       不能用 runner.*，因此这里用 github.workspace（与 runner.workspace 同目录）。
+      # 注意：job 级 env 只允许 github/secrets/vars/needs/inputs/matrix/env 上下文，不能用 runner.*
       CCACHE_DIR: ${{ github.workspace }}/.cache/.ccache
       CCACHE_COMPILERCHECK: content
       CCACHE_SLOPPINESS: time_macros
@@ -39,8 +40,7 @@ jobs:
     steps:
       # ------------------------------------------------------------------
       # 1) 拉取代码（含递归子模块）
-      #    用户要求：从 git.eden-emu.dev 仓库拉取。这是公开 Forgejo 实例，
-      #    使用裸 git clone 而非 actions/checkout（后者默认指向 github.com）。
+      #    git.eden-emu.dev 是公开 Forgejo 实例，用裸 git clone 而非 actions/checkout。
       # ------------------------------------------------------------------
       - name: Clone Eden
         shell: bash
@@ -50,7 +50,7 @@ jobs:
           echo "EDEN_REV=$(git rev-parse --short HEAD)" >> "$GITHUB_ENV"
 
       # ------------------------------------------------------------------
-      # 2) 安装 Ninja（GitHub Windows runner 默认不含 ninja）
+      # 2) 安装 Ninja（GitHub Windows runner 默认不含 ninja，build.sh 需要）
       # ------------------------------------------------------------------
       - name: Install Ninja
         shell: pwsh
@@ -61,8 +61,17 @@ jobs:
           "$env:RUNNER_TEMP\ninja" | Out-File -Append -FilePath $env:GITHUB_PATH
 
       # ------------------------------------------------------------------
-      # 3) 安装 Qt 6.9.0（提供 Qt 运行时 + windeployqt 打包工具）
-      #    aqtinstall 会自动下载桌面版 msvc2022_64。
+      # 3) 安装 Python 3.12（CPM 用 Python 下载/构建第三方依赖，Deps.md 要求 3.10+）
+      # ------------------------------------------------------------------
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          check-latest: true
+
+      # ------------------------------------------------------------------
+      # 4) 安装 Qt 6.9.0（提供 Qt 运行时 + windeployqt）
+      #    该 action 会注入环境变量 Qt6_DIR（形如 .../msvc2022_64/lib/cmake/Qt6）。
       # ------------------------------------------------------------------
       - name: Install Qt 6.9.0
         uses: jurplel/install-qt-action@v4
@@ -74,10 +83,19 @@ jobs:
           modules: ''
           tools: ''
           cache: true
-          # 该 action 会注入环境变量 Qt6_DIR（形如 .../msvc2022_64/lib/cmake/Qt6）
 
       # ------------------------------------------------------------------
-      # 4) 加载 MSVC 编译环境（cl/link/lib 等加入 PATH 与 ENV）
+      # 5) 安装 Vulkan SDK（Deps.md 明确要求：Windows 必须装）
+      #    官方脚本会下载 1.4.341.1，并在 GitHub Actions 下自动导出 VULKAN_SDK 与 Bin 路径。
+      #    脚本需要管理员权限（GitHub runner 默认具备）。
+      # ------------------------------------------------------------------
+      - name: Install Vulkan SDK
+        shell: pwsh
+        working-directory: ${{ github.workspace }}/eden
+        run: .\tools\windows\install-vulkan-sdk.ps1
+
+      # ------------------------------------------------------------------
+      # 6) 加载 MSVC 编译环境（cl/link/lib 等加入 PATH 与 ENV）
       # ------------------------------------------------------------------
       - name: Set up MSVC
         uses: ilammy/msvc-dev-cmd@v1
@@ -85,23 +103,23 @@ jobs:
           arch: x64
 
       # ------------------------------------------------------------------
-      # 5) （可选）缓存 vcpkg/CPM 第三方依赖，加速重复构建
-      #    首次构建会下载并编译大量依赖（耗时），缓存后显著变快。
+      # 7) 缓存 CPM / vcpkg / externals 第三方依赖，加速重复构建
       # ------------------------------------------------------------------
-      - name: Cache vcpkg / externals
+      - name: Cache dependencies
         uses: actions/cache@v4
         with:
           path: |
-            ${{ github.workspace }}/eden/build/vcpkg_installed
+            ${{ github.workspace }}/eden/.cache/cpm
             ${{ github.workspace }}/eden/build/externals
             ${{ github.workspace }}/eden/.vcpkg
-          key: ${{ runner.os }}-eden-vcpkg-${{ hashFiles('eden/**/CMakeLists.txt', 'eden/**/vcpkg.json') }}
+            ${{ github.workspace }}/eden/build/vcpkg_installed
+          key: ${{ runner.os }}-eden-deps-${{ hashFiles('eden/**/CMakeLists.txt', 'eden/**/vcpkg.json') }}
           restore-keys: |
-            ${{ runner.os }}-eden-vcpkg-
+            ${{ runner.os }}-eden-deps-
 
       # ------------------------------------------------------------------
-      # 6) 配置 + 编译
-      #    等价于官方 .ci/windows/build.sh（MSVC 分支），此处内联以便自包含。
+      # 8) 配置 + 编译（复用官方 .ci/windows/build.sh）
+      #    需提供：WINDEPLOYQT 路径、Qt 的 CMAKE_PREFIX_PATH、Qt bin 在 PATH。
       # ------------------------------------------------------------------
       - name: Configure & Build
         shell: bash
@@ -109,75 +127,37 @@ jobs:
         run: |
           set -euxo pipefail
 
-          # 把 windeployqt 所在 bin 目录加入 PATH（Qt6_DIR/lib/cmake/Qt6 -> 上溯到安装根/bin）
+          # 由 Qt6_DIR 反推 windeployqt 所在 bin 目录（Qt6_DIR = .../msvc2022_64/lib/cmake/Qt6）
           QT_BIN="$(dirname "$Qt6_DIR")/../../../bin"
           export PATH="$PATH:$QT_BIN"
-          echo "Qt bin dir: $QT_BIN"
-          which windeployqt || ls "$QT_BIN"
+          export WINDEPLOYQT="$QT_BIN/windeployqt.exe"
+          export CMAKE_PREFIX_PATH="$Qt6_DIR"
 
-          mkdir -p build
-          cmake -S . -B build -G Ninja \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DENABLE_QT_TRANSLATION=ON \
-            -DUSE_DISCORD_PRESENCE=ON \
-            -DYUZU_USE_BUNDLED_SDL2=ON \
-            -DBUILD_TESTING=OFF \
-            -DYUZU_TESTS=OFF \
-            -DDYNARMIC_TESTS=OFF \
-            -DYUZU_CMD=OFF \
-            -DYUZU_ROOM_STANDALONE=OFF \
-            -DYUZU_USE_QT_MULTIMEDIA=false \
-            -DYUZU_USE_QT_WEB_ENGINE=false \
-            -DENABLE_LTO=ON \
-            -DCMAKE_EXE_LINKER_FLAGS=" /LTCG" \
-            -DYUZU_USE_BUNDLED_QT=false \
-            -DENABLE_UPDATE_CHECKER=false \
-            -DUSE_CCACHE=$USE_CCACHE \
-            -DCMAKE_PREFIX_PATH="$Qt6_DIR"
-
-          cmake --build build --config Release
+          # DEVEL=false 关闭更新检查器（避免额外网络依赖）
+          DEVEL=false ./.ci/windows/build.sh
 
       # ------------------------------------------------------------------
-      # 7) 打包：用 windeployqt 收集 Qt/运行时依赖，再打成 zip
-      #    等价于官方 .ci/windows/package.sh。
+      # 9) 打包（复用官方 .ci/windows/package.sh）
+      #    需要 7-Zip；官方脚本用 7z 压缩，这里把 Qt bin 与 7-Zip 加入 PATH。
+      #    ARCH 仅用于产物命名。
       # ------------------------------------------------------------------
       - name: Package artifacts
         shell: bash
         working-directory: ${{ github.workspace }}/eden
+        env:
+          ARCH: x86_64
         run: |
           set -euxo pipefail
 
           QT_BIN="$(dirname "$Qt6_DIR")/../../../bin"
-          export PATH="$PATH:$QT_BIN"
+          export PATH="$PATH:$QT_BIN:C:/Program Files/7-Zip"
 
-          # 移除调试符号以减小体积
-          rm -f build/bin/*.pdb
+          ./.ci/windows/package.sh
 
-          # 收集 Qt 依赖到 build/pkg
-          windeployqt --release --no-compiler-runtime --no-opengl-sw \
-            --no-system-dxc-compiler --no-system-d3d-compiler \
-            --dir build/pkg build/bin/eden.exe
-
-          # 复制主程序与同目录文件到 pkg
-          cp build/bin/* build/pkg/ 2>/dev/null || true
-
-          # 生成产物名并压缩
-          GITDATE=$(git show -s --date=short --format='%ad' | tr -d '-')
-          GITREV=$(git show -s --format='%h')
-          ZIP_NAME="Eden-Windows-${GITDATE}-${GITREV}.zip"
-          echo "ZIP_NAME=$ZIP_NAME" >> "$GITHUB_ENV"
-
-          mkdir -p artifacts
-          if command -v 7z >/dev/null 2>&1; then
-            7z a -tzip "artifacts/$ZIP_NAME" ./build/pkg/*
-          else
-            powershell -Command "Compress-Archive -Path 'build/pkg/*' -DestinationPath 'artifacts/$ZIP_NAME' -Force"
-          fi
-
-          ls -lh "artifacts/$ZIP_NAME"
+          ls -lh artifacts/
 
       # ------------------------------------------------------------------
-      # 8) 上传产物
+      # 10) 上传产物
       # ------------------------------------------------------------------
       - name: Upload Windows artifacts
         uses: actions/upload-artifact@v4
