@@ -30,7 +30,9 @@ jobs:
     env:
       # ccache（可选）：如需加速重复构建，把 USE_CCACHE 设为 true 并保留下方 cache 步骤
       USE_CCACHE: "false"
-      CCACHE_DIR: ${{ runner.workspace }}/.cache/.ccache
+      # 注意：job 级 env 只允许 github/secrets/vars/needs/inputs/matrix/env 上下文，
+      #       不能用 runner.*，因此这里用 github.workspace（与 runner.workspace 同目录）。
+      CCACHE_DIR: ${{ github.workspace }}/.cache/.ccache
       CCACHE_COMPILERCHECK: content
       CCACHE_SLOPPINESS: time_macros
 
