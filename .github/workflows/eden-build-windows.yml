@@ -71,7 +71,8 @@ jobs:
 
       # ------------------------------------------------------------------
       # 4) 安装 Qt 6.9.0（提供 Qt 运行时 + windeployqt）
-      #    该 action 会注入环境变量 Qt6_DIR（形如 .../msvc2022_64/lib/cmake/Qt6）。
+      #    注意：install-qt-action@v4 注入的是 QT_ROOT_DIR（形如 .../6.9.0/msvc2022_64），
+      #          不再自动设置 Qt6_DIR；Qt6_DIR 由后续构建/打包步骤用 QT_ROOT_DIR 反推。
       # ------------------------------------------------------------------
       - name: Install Qt 6.9.0
         uses: jurplel/install-qt-action@v4
@@ -127,8 +128,10 @@ jobs:
         run: |
           set -euxo pipefail
 
-          # 由 Qt6_DIR 反推 windeployqt 所在 bin 目录（Qt6_DIR = .../msvc2022_64/lib/cmake/Qt6）
-          QT_BIN="$(dirname "$Qt6_DIR")/../../../bin"
+          # install-qt-action@v4 注入的是 QT_ROOT_DIR（形如 .../6.9.0/msvc2022_64），
+          # 不再自动设置 Qt6_DIR，需在此自行反推 Qt6 的 CMake 目录与 windeployqt 路径。
+          export Qt6_DIR="${QT_ROOT_DIR}/lib/cmake/Qt6"
+          QT_BIN="${QT_ROOT_DIR}/bin"
           export PATH="$PATH:$QT_BIN"
           export WINDEPLOYQT="$QT_BIN/windeployqt.exe"
           export CMAKE_PREFIX_PATH="$Qt6_DIR"
@@ -149,7 +152,9 @@ jobs:
         run: |
           set -euxo pipefail
 
-          QT_BIN="$(dirname "$Qt6_DIR")/../../../bin"
+          # 与构建步骤一致，先从 QT_ROOT_DIR 反推 Qt bin 目录
+          export Qt6_DIR="${QT_ROOT_DIR}/lib/cmake/Qt6"
+          QT_BIN="${QT_ROOT_DIR}/bin"
           export PATH="$PATH:$QT_BIN:C:/Program Files/7-Zip"
 
           ./.ci/windows/package.sh
