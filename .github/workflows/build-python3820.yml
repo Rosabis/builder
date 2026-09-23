@@ -104,23 +104,21 @@ jobs:
 
       # ---------------------------------------------------------------
       # 5) 编译（外部依赖已在第 3 步拉取，build.bat 会复用不再下载）
-      #    输出同时写入日志文件，便于失败时排查；步级超时 280 分钟。
+      #    直接在当前 shell 跑，日志实时出现在 Actions 里，同时写入文件。
+      #    不要用 Start-Process 把 stdout/stderr 重定向到文件再 -Wait：
+      #    Windows 上两个管道同时重定向会把编译进程卡死，页面只停在 “Building ...”。
       # ---------------------------------------------------------------
       - name: Build CPython (${{ matrix.platform }}) (timeout 280m)
         timeout-minutes: 280
         shell: pwsh
         working-directory: ${{ env.SRC_DIR }}
         run: |
-          $ErrorActionPreference = 'Stop'
+          $ErrorActionPreference = 'Continue'
           $plat = "${{ matrix.platform }}"
           $log  = "build-${{ matrix.name }}.log"
           Write-Host "Building $plat -> $log"
-          $p = Start-Process -FilePath "cmd.exe" `
-            -ArgumentList "/c PCbuild\build.bat -p $plat -c Release" `
-            -RedirectStandardOutput $log -RedirectStandardError "build-${{ matrix.name }}.err" `
-            -Wait -NoNewWindow -PassThru
-          Get-Content $log
-          if ($p.ExitCode -ne 0) { throw "build.bat exited with $($p.ExitCode)" }
+          & cmd.exe /c "PCbuild\build.bat -p $plat -c Release" 2>&1 | Tee-Object -FilePath $log
+          if ($LASTEXITCODE -ne 0) { throw "build.bat exited with $LASTEXITCODE" }
           Write-Host "BUILD OK"
 
       # ---------------------------------------------------------------
