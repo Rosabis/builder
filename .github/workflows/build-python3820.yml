@@ -63,7 +63,7 @@ on:
 jobs:
   build:
     runs-on: windows-2022
-    timeout-minutes: 180
+    timeout-minutes: 360
 
     # 手动触发时优先使用输入参数；自动 push 触发时回退到默认值
     env:
@@ -127,6 +127,20 @@ jobs:
           # & "C:\Program Files\7-Zip\7z.exe" x Python-$($env:PYTHON_VERSION).tar -y
 
       # ---------------------------------------------------------------
+      # 3.5) 单独拉取外部依赖（OpenSSL / Tcl-Tk / sqlite / libffi / expat）
+      #    拆出来的原因：build.bat -e 会在“静默”中下载这些大文件，一旦网络
+      #    卡死就会无限期 hang 直到 job 超时（正是 2026-09-23 那次失败的根因）。
+      #    单独成步并设置步级超时，下载卡住时能快速、可见地失败，而不是白白
+      #    耗掉 3 小时；同时编译步骤可去掉 -e 专心编译。
+      # ---------------------------------------------------------------
+      - name: Fetch external dependencies
+        shell: cmd
+        timeout-minutes: 60
+        working-directory: Python-${{ env.PYTHON_VERSION }}
+        run: |
+          call PCbuild\get_externals.bat
+
+      # ---------------------------------------------------------------
       # 4) 注入 MSVC 编译环境（按架构：x64 / x86）
       # ---------------------------------------------------------------
       - name: Set up MSVC
@@ -135,16 +149,17 @@ jobs:
           arch: ${{ matrix.msvc }}
 
       # ---------------------------------------------------------------
-      # 5) 下载外部依赖（OpenSSL / Tcl-Tk / libffi / sqlite / expat 等）并编译
-      #    build.bat -e      显式启用外部依赖下载与编译
+      # 5) 编译（外部依赖已在 3.5 步拉取，故不再带 -e）
       #    -p <platform>     Win32 或 x64
       #    -c Release        发布版本
+      #    步级超时 280 分钟：留给 x86 完整编译充足时间，且不会无限 hang。
       # ---------------------------------------------------------------
       - name: Build CPython (${{ matrix.platform }})
         shell: cmd
+        timeout-minutes: 280
         working-directory: Python-${{ env.PYTHON_VERSION }}
         run: |
-          call PCbuild\build.bat -e -p ${{ matrix.platform }} -c Release
+          call PCbuild\build.bat -p ${{ matrix.platform }} -c Release
 
       # ---------------------------------------------------------------
       # 6) 冒烟测试：刚编译出的 python.exe 能正常启动并输出版本号
