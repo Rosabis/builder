@@ -93,14 +93,35 @@ jobs:
 
       # 安装包里的 doc.msi 要引用 Doc/build/html。源码 tarball 不含编好的文档，
       # 缺了它 WiX 会报 LGHT0094: Unresolved reference to symbol 'WixComponentGroup:doc_html'。
+      # 3.8 的 Doc\make.bat 会走 find_python.bat，而它 nuget install pythonx86 不锁版本，
+      # 现在会装到 Python 3.14。Sphinx 2.4 在 3.14 上还会碰到 setuptools 84 去掉的 pkg_resources。
+      # 因此 Sphinx 2.x 改用单独的 Python 3.8.10，并限制 setuptools<71。
       - name: Build HTML documentation
         timeout-minutes: 40
         shell: pwsh
         working-directory: ${{ env.SRC_DIR }}
         run: |
           $ErrorActionPreference = 'Stop'
-          python -m pip install -r Doc/requirements.txt
-          if ($LASTEXITCODE -ne 0) { throw "pip install docs deps failed" }
+          $req = Get-Content -Raw Doc\requirements.txt
+          $oldSphinx = $req -match '(?m)^\s*sphinx\s*(==|~=)\s*2\.'
+          if ($oldSphinx) {
+            $nuget = "externals\nuget.exe"
+            if (-not (Test-Path $nuget)) { throw "nuget.exe not found in externals" }
+            $dest = Join-Path $env:RUNNER_TEMP "docpy"
+            & $nuget install pythonx86 -Version 3.8.10 -ExcludeVersion -OutputDirectory $dest
+            if ($LASTEXITCODE -ne 0) { throw "nuget install pythonx86 3.8.10 failed" }
+            $docPy = Join-Path $dest "pythonx86\tools\python.exe"
+            if (-not (Test-Path $docPy)) { throw "doc python not found: $docPy" }
+            & $docPy -m pip install -U "pip<24.1" "setuptools<71" "wheel"
+            if ($LASTEXITCODE -ne 0) { throw "doc python pip bootstrap failed" }
+            $constraint = Join-Path $env:RUNNER_TEMP "doc-constraints.txt"
+            Set-Content -Path $constraint -Value "setuptools<71"
+            $env:PIP_CONSTRAINT = $constraint
+          } else {
+            $docPy = (Get-Command python).Source
+          }
+          Write-Host "Doc Python: $docPy"
+          $env:PYTHON = $docPy
           & cmd.exe /c "Doc\make.bat html"
           if ($LASTEXITCODE -ne 0) { throw "doc build failed: $LASTEXITCODE" }
           if (-not (Test-Path "Doc\build\html\index.html")) { throw "Doc/build/html/index.html missing" }
