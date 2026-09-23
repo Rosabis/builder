@@ -1,0 +1,121 @@
+# 按版本编译 CPython Windows 安装包（x86 / x64）
+#
+# 使用：Actions 页面点 “Run workflow”，填写版本号（例如 3.11.16）。
+#       工作流会下载 https://www.python.org/ftp/python/<版本>/Python-<版本>.tar.xz
+#       并用 Tools\msi\build.bat --pack 打出可安装的 exe（不是绿色版 zip）。
+# 产物：python-<版本>-amd64 / python-<版本>-win32 里的 *.exe
+
+name: Build CPython installer (Windows x86/x64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      python_version:
+        description: "CPython 版本号，例如 3.11.16 / 3.12.7"
+        required: true
+        default: "3.11.16"
+        type: string
+  push:
+    branches: [main, master]
+
+env:
+  BUILD_HOST_PYTHON: "3.12"    # 仅用于跑构建辅助脚本，与产物版本无关
+
+jobs:
+  build:
+    name: Build ${{ matrix.name }}
+    runs-on: windows-2022
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: amd64, msvc: x64, outdir: amd64, msi_flag: "-x64" }
+          - { name: win32, msvc: x86, outdir: win32, msi_flag: "-x86" }
+
+    steps:
+      - name: Setup build host Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.BUILD_HOST_PYTHON }}
+
+      # 手动触发用表单里的版本；push 触发没有表单，回退到 3.11.16。
+      - name: Download & extract source
+        timeout-minutes: 20
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $ver = "${{ github.event.inputs.python_version }}"
+          if (-not $ver) { $ver = "3.11.16" }
+          if ($ver -notmatch '^\d+\.\d+\.\d+([a-z]+\d+)?$') {
+            throw "Invalid version '$ver' (example: 3.11.16)"
+          }
+          $srcDir = "Python-$ver"
+          $url = "https://www.python.org/ftp/python/$ver/$srcDir.tar.xz"
+          Add-Content -Path $env:GITHUB_ENV -Value "PY_VER=$ver"
+          Add-Content -Path $env:GITHUB_ENV -Value "SRC_DIR=$srcDir"
+          Write-Host "Downloading: $url"
+          Invoke-WebRequest -Uri $url -OutFile src.tar.xz
+          $seven = "C:\Program Files\7-Zip\7z.exe"
+          if (-not (Test-Path $seven)) { throw "7z not found: $seven" }
+          & $seven x src.tar.xz -y
+          if ($LASTEXITCODE -ne 0) { throw "7z xz extract failed: $LASTEXITCODE" }
+          if (-not (Test-Path "src.tar")) { throw "src.tar not found after xz extract" }
+          & $seven x src.tar -y
+          if ($LASTEXITCODE -ne 0) { throw "7z tar extract failed: $LASTEXITCODE" }
+          Remove-Item src.tar -Force
+          if (-not (Test-Path $srcDir)) { throw "Extract failed: $srcDir not found" }
+          Write-Host "Extracted $srcDir"
+
+      - name: Fetch external dependencies (retry, timeout 90m)
+        timeout-minutes: 90
+        shell: cmd
+        working-directory: ${{ env.SRC_DIR }}
+        run: |
+          setlocal EnableDelayedExpansion
+          set RETRIES=3
+          :loop
+          call PCbuild\get_externals.bat && goto :ok
+          set /a RETRIES-=1
+          if !RETRIES! gtr 0 (echo RETRY get_externals... & goto :loop)
+          echo get_externals failed after retries
+          exit /b 1
+          :ok
+          echo get_externals done
+
+      - name: Fetch WiX installer dependencies
+        timeout-minutes: 30
+        shell: cmd
+        working-directory: ${{ env.SRC_DIR }}
+        run: |
+          call Tools\msi\get_externals.bat
+          if errorlevel 1 exit /b 1
+
+      - name: Set up MSVC (${{ matrix.msvc }})
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: ${{ matrix.msvc }}
+
+      # build.bat 会再编一次 Release 和 Debug（安装包需要 Debug），
+      # 然后用 WiX 打出带 --pack 的 exe，单个文件即可安装。
+      - name: Build installer (${{ matrix.name }})
+        timeout-minutes: 280
+        shell: cmd
+        working-directory: ${{ env.SRC_DIR }}
+        run: |
+          call Tools\msi\build.bat ${{ matrix.msi_flag }} --pack
+          if errorlevel 1 exit /b 1
+
+      - name: Smoke test
+        shell: cmd
+        working-directory: ${{ env.SRC_DIR }}
+        run: |
+          PCbuild\${{ matrix.outdir }}\python.exe -V
+
+      - name: Upload installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-${{ env.PY_VER }}-${{ matrix.name }}
+          path: ${{ env.SRC_DIR }}/PCbuild/${{ matrix.outdir }}/en-us/*.exe
+          retention-days: 30
+          if-no-files-found: error
