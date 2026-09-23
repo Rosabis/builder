@@ -105,6 +105,17 @@ jobs:
             $url = "https://www.python.org/ftp/python/$($env:PYTHON_VERSION)/Python-$($env:PYTHON_VERSION).tar.xz"
           }
           Write-Host "Downloading: $url"
+
+          # 从 tarball 文件名反推“实际解包出的目录名”与“版本号”。
+          # 这样即使手动填了 PYTHON_URL（版本与 PYTHON_VERSION 不同），
+          # 后续 working-directory / 产物命名也始终以“真正下载的包”为准。
+          $fname   = [System.IO.Path]::GetFileName($url)
+          $SRC_DIR = $fname -replace '\.tar\.xz$','' -replace '\.tar\.gz$','' -replace '\.tgz$','' -replace '\.zip$',''
+          $PY_VER  = $SRC_DIR -replace '^Python-',''
+          Add-Content -Path $env:GITHUB_ENV -Value "SRC_DIR=$SRC_DIR"
+          Add-Content -Path $env:GITHUB_ENV -Value "PY_VER=$PY_VER"
+          Write-Host "SRC_DIR=$SRC_DIR  PY_VER=$PY_VER"
+
           Invoke-WebRequest -Uri $url -OutFile src.tar.xz
 
           if ($env:PYTHON_MD5) {
@@ -136,7 +147,7 @@ jobs:
       - name: Fetch external dependencies
         shell: cmd
         timeout-minutes: 60
-        working-directory: Python-${{ env.PYTHON_VERSION }}
+        working-directory: ${{ env.SRC_DIR }}
         run: |
           call PCbuild\get_externals.bat
 
@@ -157,7 +168,7 @@ jobs:
       - name: Build CPython (${{ matrix.platform }})
         shell: cmd
         timeout-minutes: 280
-        working-directory: Python-${{ env.PYTHON_VERSION }}
+        working-directory: ${{ env.SRC_DIR }}
         run: |
           call PCbuild\build.bat -p ${{ matrix.platform }} -c Release
 
@@ -166,7 +177,7 @@ jobs:
       # ---------------------------------------------------------------
       - name: Smoke test
         shell: cmd
-        working-directory: Python-${{ env.PYTHON_VERSION }}
+        working-directory: ${{ env.SRC_DIR }}
         run: |
           PCbuild\${{ matrix.outdir }}\python.exe -V
 
@@ -179,12 +190,12 @@ jobs:
       - name: Create runnable layout
         continue-on-error: true
         shell: cmd
-        working-directory: Python-${{ env.PYTHON_VERSION }}
+        working-directory: ${{ env.SRC_DIR }}
         run: |
           set PYTHONPATH=%CD%
           PCbuild\${{ matrix.outdir }}\python.exe -m PC.layout.main ^
             --source . --build PCbuild\${{ matrix.outdir }} --arch ${{ matrix.layout_arch }} ^
-            --copy dist\python-${{ env.PYTHON_VERSION }}-${{ matrix.name }} ^
+            --copy dist\python-${{ env.PY_VER }}-${{ matrix.name }} ^
             --include-pip --include-idle --include-tcltk --include-venv --include-underpth --include-dev
 
       # ---------------------------------------------------------------
@@ -193,11 +204,11 @@ jobs:
       # ---------------------------------------------------------------
       - name: Package & upload artifact
         shell: pwsh
-        working-directory: Python-${{ env.PYTHON_VERSION }}
+        working-directory: ${{ env.SRC_DIR }}
         run: |
           $Env:PATH += ";C:\Program Files\7-Zip"
-          $artifact = "python-$($env:PYTHON_VERSION)-${{ matrix.name }}.zip"
-          $layout = "dist\python-$($env:PYTHON_VERSION)-${{ matrix.name }}"
+          $artifact = "python-$($env:PY_VER)-${{ matrix.name }}.zip"
+          $layout = "dist\python-$($env:PY_VER)-${{ matrix.name }}"
           $src = if (Test-Path $layout) { $layout } else { "PCbuild\${{ matrix.outdir }}" }
           Write-Host "Packaging from: $src"
           & 7z a -tzip $artifact $src
@@ -205,6 +216,6 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: python-${{ env.PYTHON_VERSION }}-${{ matrix.name }}
-          path: Python-${{ env.PYTHON_VERSION }}/python-${{ env.PYTHON_VERSION }}-${{ matrix.name }}.zip
+          name: python-${{ env.PY_VER }}-${{ matrix.name }}
+          path: ${{ env.SRC_DIR }}/python-${{ env.PY_VER }}-${{ matrix.name }}.zip
           retention-days: 30
