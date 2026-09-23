@@ -1,7 +1,7 @@
 # Eden Windows 自动构建工作流
 # 用途：自动从 https://git.eden-emu.dev/eden-emu/eden.git 拉取代码，编译并打包 Windows 版本。
 # 使用：把本文件放到你的仓库 .github/workflows/ 目录下（文件名随意，例如 build-windows.yml），
-#       然后在 GitHub Actions 页面手动触发（workflow_dispatch）或按下方触发条件自动运行。
+#       然后在 GitHub Actions 页面手动触发（workflow_dispatch）。
 #
 # 设计：Eden 真正的构建脚本在独立仓库 Eden-CI/Workflow（Build.md 第195行指明），
 #       而 eden 仓库内的 .ci/ 只有 actool.sh / android / license-header.sh，并没有 windows/build.sh。
@@ -17,11 +17,7 @@
 name: Build Eden (Windows)
 
 on:
-  workflow_dispatch:            # 允许在 Actions 页面手动触发
-  push:
-    branches: [ main, master ] # 推送到主分支时自动构建
-  schedule:
-    - cron: '0 6 * * *'        # 每天 UTC 6:00 自动拉取最新代码构建（如不需要可删除本段）
+  workflow_dispatch:            # 仅在 Actions 页面手动触发
 
 # 防止并发运行占用过多额度
 concurrency:

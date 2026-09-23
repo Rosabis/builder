@@ -1,91 +1,39 @@
-# 从源码编译任意版本的 CPython（Windows x86 / x64）
-# 用途：自动下载指定版本的 CPython 源码，在 GitHub Actions 上分别编译
-#       32 位（Win32）与 64 位（x64）版本，并打包上传产物。
+# 编译并打包 CPython 3.11.16（Windows x86 / x64）
+# 专用工作流：只处理 3.11.16，已去掉多版本推导与手动输入逻辑。
 #
-# 自定义方式（推荐在 Actions 页面手动运行时填写参数）：
-#   python_version       要编译的版本号，例如 3.8.20 / 3.11.16 / 3.12.7
-#                       下载地址与产物名都由它推导，目录固定为 Python-<版本>。
-#   python_url          可选：直接写完整 tarball 地址覆盖上面的推导，例如
-#                       https://www.python.org/ftp/python/3.11.16/Python-3.11.16.tar.xz
-#                       留空则按 python_version 自动拼
-#                       https://www.python.org/ftp/python/<ver>/Python-<ver>.tar.xz
-#   python_md5          可选：填官方 MD5 则在下载后校验完整性；留空跳过校验。
-#   build_host_python   用于跑构建辅助脚本的“构建主机” Python 版本（默认 3.12，
-#                       能覆盖 3.8+ 的编译；编译 3.13 时可改成 3.13）。
-#
-# 使用：
-#   1. 把本文件放到 .github/workflows/ 目录（文件名随意）。
-#   2. 推送到仓库后，在 Actions 页面点击 “Run workflow” 手动触发，
-#      在弹出的表单里填版本号等参数。
-#   3. 构建完成后，在 Artifacts 中下载 python-<版本>-win32.zip / python-<版本>-amd64.zip。
-#
-# 说明：
-#   - 编译环境用 VS 2022（windows-2022 runner）+ ilammy/msvc-dev-cmd 注入 MSVC 工具链。
-#   - CPython 3.8+ 的 vcxproj 未固定 PlatformToolset，会用 VS2022 默认的 v143，
-#     仅在老版本上打印一条 “not used for official builds” 的警告，不影响结果。
-#   - 通过 PC/layout 生成可直接运行的 Python 目录（含 Lib、DLLs、pip、idle、venv 等）。
-#   - 若 layout 步骤失败，会回退打包原始 PCbuild 编译产物，保证至少有可用的二进制。
+# 使用：推送到仓库后，在 Actions 页面点 “Run workflow” 触发（或 push 到主分支自动触发）。
+# 产物：Artifacts 中的 python-3.11.16-win32.zip / python-3.11.16-amd64.zip
+# 若某架构失败，可在 Artifacts 下载 buildlog-3.11.16-<arch>.log 排查。
 
-name: Build CPython (Windows x86/x64)
+name: Build CPython 3.11.16 (Windows x86/x64)
 
 on:
-  # 手动触发：在 Actions 页面弹出表单，输入版本号等参数
   workflow_dispatch:
-    inputs:
-      python_version:
-        description: "要编译的 CPython 版本，例如 3.8.20 / 3.11.16"
-        required: true
-        default: "3.8.20"
-        type: string
-      python_url:
-        description: "源码 tarball 完整地址（留空则按版本自动推导）"
-        required: false
-        default: ""
-        type: string
-      python_md5:
-        description: "可选 MD5 校验值（留空跳过校验）"
-        required: false
-        default: ""
-        type: string
-      build_host_python:
-        description: "构建主机 Python 版本（默认 3.12）"
-        required: false
-        default: "3.12"
-        type: string
-
-  # 推送到主分支时自动构建（使用 env 里的默认值）
   push:
     branches: [main, master]
 
-# 说明：两个架构通过 matrix 各自成为独立 job，本就并行执行、互不取消，
-#       因此无需额外配置 concurrency（其 group 表达式也不支持引用 matrix）。
+env:
+  PY_VER: "3.11.16"
+  SRC_DIR: "Python-3.11.16"
+  SRC_URL: "https://www.python.org/ftp/python/3.11.16/Python-3.11.16.tar.xz"
+  SRC_MD5: ""                  # 可选：填官方 MD5 则下载后校验完整性；留空跳过
+  BUILD_HOST_PYTHON: "3.12"    # 仅用于跑构建辅助脚本的“构建主机”，与产物版本无关
 
 jobs:
   build:
+    name: Build ${{ matrix.name }}
     runs-on: windows-2022
     timeout-minutes: 360
-
-    # 手动触发时优先使用输入参数；自动 push 触发时回退到默认值
-    env:
-      PYTHON_VERSION: ${{ github.event.inputs.python_version || '3.8.20' }}
-      PYTHON_URL: ${{ github.event.inputs.python_url || '' }}
-      PYTHON_MD5: ${{ github.event.inputs.python_md5 || '' }}
-      BUILD_HOST_PYTHON: ${{ github.event.inputs.build_host_python || '3.12' }}
-
     strategy:
-      fail-fast: false
+      fail-fast: false         # 两个架构独立，一个失败不影响另一个
       matrix:
         include:
-          # name: 产物后缀；platform: build.bat -p 参数；msvc: ilammy 架构；
-          # outdir: PCbuild 输出子目录；layout_arch: PC/layout --arch 参数
           - { name: amd64, platform: x64,   msvc: x64, outdir: amd64, layout_arch: amd64 }
           - { name: win32, platform: Win32, msvc: x86, outdir: win32, layout_arch: win32 }
 
     steps:
       # ---------------------------------------------------------------
-      # 1) 安装构建用主机 Python
-      #    CPython 构建脚本需要一台 Python 来跑辅助脚本（生成版本号、regen 等）。
-      #    这里装的是“构建主机”，与最终编译出的版本无关。
+      # 1) 安装构建用主机 Python（跑 regen / PC.layout 等辅助脚本用）
       # ---------------------------------------------------------------
       - name: Setup build host Python
         uses: actions/setup-python@v5
@@ -93,87 +41,89 @@ jobs:
           python-version: ${{ env.BUILD_HOST_PYTHON }}
 
       # ---------------------------------------------------------------
-      # 2) 下载并（可选）校验 CPython 源码
-      #    优先用 PYTHON_URL；未设置则按 PYTHON_VERSION 推导标准 ftp 地址。
+      # 2) 下载并（可选）校验 3.11.16 源码，解包出 Python-3.11.16
       # ---------------------------------------------------------------
-      - name: Download & verify source
+      - name: Download & extract source
+        timeout-minutes: 20
         shell: pwsh
         run: |
-          if ($env:PYTHON_URL) {
-            $url = $env:PYTHON_URL
-          } else {
-            $url = "https://www.python.org/ftp/python/$($env:PYTHON_VERSION)/Python-$($env:PYTHON_VERSION).tar.xz"
-          }
+          $ErrorActionPreference = 'Stop'
+          $url = "${{ env.SRC_URL }}"
           Write-Host "Downloading: $url"
-
-          # 从 tarball 文件名反推“实际解包出的目录名”与“版本号”。
-          # 这样即使手动填了 PYTHON_URL（版本与 PYTHON_VERSION 不同），
-          # 后续 working-directory / 产物命名也始终以“真正下载的包”为准。
-          $fname   = [System.IO.Path]::GetFileName($url)
-          $SRC_DIR = $fname -replace '\.tar\.xz$','' -replace '\.tar\.gz$','' -replace '\.tgz$','' -replace '\.zip$',''
-          $PY_VER  = $SRC_DIR -replace '^Python-',''
-          Add-Content -Path $env:GITHUB_ENV -Value "SRC_DIR=$SRC_DIR"
-          Add-Content -Path $env:GITHUB_ENV -Value "PY_VER=$PY_VER"
-          Write-Host "SRC_DIR=$SRC_DIR  PY_VER=$PY_VER"
-
           Invoke-WebRequest -Uri $url -OutFile src.tar.xz
-
-          if ($env:PYTHON_MD5) {
+          if ("${{ env.SRC_MD5 }}" -ne "") {
             $actual = (Get-FileHash -Algorithm MD5 src.tar.xz).Hash.ToLower()
-            Write-Host "Downloaded MD5 = $actual (expected $($env:PYTHON_MD5))"
-            if ($actual -ne $env:PYTHON_MD5.ToLower()) { throw "MD5 mismatch!" }
+            Write-Host "MD5 = $actual (expect ${{ env.SRC_MD5 }})"
+            if ($actual -ne "${{ env.SRC_MD5 }}".ToLower()) { throw "MD5 mismatch" }
           } else {
-            Write-Host "PYTHON_MD5 not set, skipping integrity check."
+            Write-Host "SRC_MD5 empty, skip checksum."
           }
+          # windows-2022 自带的 tar.exe 解 .tar.xz 会无输出挂死，改用 runner 自带的 7-Zip。
+          $seven = "C:\Program Files\7-Zip\7z.exe"
+          if (-not (Test-Path $seven)) { throw "7z not found: $seven" }
+          $tarName = "${{ env.SRC_DIR }}.tar"
+          Write-Host "7z extract xz -> $tarName"
+          & $seven x src.tar.xz -y
+          if ($LASTEXITCODE -ne 0) { throw "7z xz extract failed: $LASTEXITCODE" }
+          Write-Host "7z extract tar"
+          & $seven x $tarName -y
+          if ($LASTEXITCODE -ne 0) { throw "7z tar extract failed: $LASTEXITCODE" }
+          Remove-Item $tarName -Force
+          if (-not (Test-Path "${{ env.SRC_DIR }}")) { throw "Extract failed: ${{ env.SRC_DIR }} not found" }
+          Write-Host "Extracted ${{ env.SRC_DIR }}"
 
       # ---------------------------------------------------------------
-      # 3) 解包源码（解出的顶层目录固定为 Python-<版本>）
+      # 3) 预拉取外部依赖（OpenSSL / Tcl-Tk / sqlite / libffi / expat 等）
+      #    build.bat 默认也会自行拉取；这里先拉好并设步级超时+重试，
+      #    一旦网络卡死能快速、可见地失败，而不是静默耗满 3 小时。
       # ---------------------------------------------------------------
-      - name: Extract source
-        shell: pwsh
-        run: |
-          tar -xf src.tar.xz
-          # 备选方案（若 runner 的 tar 不支持 xz）：改用 7-Zip 两步解包
-          # & "C:\Program Files\7-Zip\7z.exe" x src.tar.xz -y
-          # & "C:\Program Files\7-Zip\7z.exe" x $($env:SRC_DIR).tar -y
-
-      # ---------------------------------------------------------------
-      # 3.5) 单独拉取外部依赖（OpenSSL / Tcl-Tk / sqlite / libffi / expat）
-      #    拆出来的原因：build.bat -e 会在“静默”中下载这些大文件，一旦网络
-      #    卡死就会无限期 hang 直到 job 超时（正是 2026-09-23 那次失败的根因）。
-      #    单独成步并设置步级超时，下载卡住时能快速、可见地失败，而不是白白
-      #    耗掉 3 小时；同时编译步骤可去掉 -e 专心编译。
-      # ---------------------------------------------------------------
-      - name: Fetch external dependencies
+      - name: Fetch external dependencies (retry, timeout 90m)
+        timeout-minutes: 90
         shell: cmd
-        timeout-minutes: 60
         working-directory: ${{ env.SRC_DIR }}
         run: |
-          call PCbuild\get_externals.bat
+          setlocal EnableDelayedExpansion
+          set RETRIES=3
+          :loop
+          call PCbuild\get_externals.bat && goto :ok
+          set /a RETRIES-=1
+          if !RETRIES! gtr 0 (echo RETRY get_externals... & goto :loop)
+          echo get_externals failed after retries
+          exit /b 1
+          :ok
+          echo get_externals done
 
       # ---------------------------------------------------------------
       # 4) 注入 MSVC 编译环境（按架构：x64 / x86）
       # ---------------------------------------------------------------
-      - name: Set up MSVC
+      - name: Set up MSVC (${{ matrix.msvc }})
         uses: ilammy/msvc-dev-cmd@v1
         with:
           arch: ${{ matrix.msvc }}
 
       # ---------------------------------------------------------------
-      # 5) 编译（外部依赖已在 3.5 步拉取，故不再带 -e）
-      #    -p <platform>     Win32 或 x64
-      #    -c Release        发布版本
-      #    步级超时 280 分钟：留给 x86 完整编译充足时间，且不会无限 hang。
+      # 5) 编译（外部依赖已在第 3 步拉取，build.bat 会复用不再下载）
+      #    输出同时写入日志文件，便于失败时排查；步级超时 280 分钟。
       # ---------------------------------------------------------------
-      - name: Build CPython (${{ matrix.platform }})
-        shell: cmd
+      - name: Build CPython (${{ matrix.platform }}) (timeout 280m)
         timeout-minutes: 280
+        shell: pwsh
         working-directory: ${{ env.SRC_DIR }}
         run: |
-          call PCbuild\build.bat -p ${{ matrix.platform }} -c Release
+          $ErrorActionPreference = 'Stop'
+          $plat = "${{ matrix.platform }}"
+          $log  = "build-${{ matrix.name }}.log"
+          Write-Host "Building $plat -> $log"
+          $p = Start-Process -FilePath "cmd.exe" `
+            -ArgumentList "/c PCbuild\build.bat -p $plat -c Release" `
+            -RedirectStandardOutput $log -RedirectStandardError "build-${{ matrix.name }}.err" `
+            -Wait -NoNewWindow -PassThru
+          Get-Content $log
+          if ($p.ExitCode -ne 0) { throw "build.bat exited with $($p.ExitCode)" }
+          Write-Host "BUILD OK"
 
       # ---------------------------------------------------------------
-      # 6) 冒烟测试：刚编译出的 python.exe 能正常启动并输出版本号
+      # 6) 冒烟测试：刚编译出的 python.exe 能正常启动
       # ---------------------------------------------------------------
       - name: Smoke test
         shell: cmd
@@ -183,8 +133,7 @@ jobs:
 
       # ---------------------------------------------------------------
       # 7) 生成可直接运行的 Python 目录（PC/layout）
-      #    用“刚编译好的” python 运行 PC.layout.main，把 Lib / DLLs / pip / idle /
-      #    venv / 头文件等拷贝成一份独立可运行的发行目录。
+      #    用刚编好的 python 运行 PC.layout.main，拷贝 Lib/DLLs/pip/idle 等。
       #    continue-on-error：即使本步失败，下一步也会回退打包原始编译产物。
       # ---------------------------------------------------------------
       - name: Create runnable layout
@@ -192,27 +141,41 @@ jobs:
         shell: cmd
         working-directory: ${{ env.SRC_DIR }}
         run: |
-          set PYTHONPATH=%CD%
           PCbuild\${{ matrix.outdir }}\python.exe -m PC.layout.main ^
             --source . --build PCbuild\${{ matrix.outdir }} --arch ${{ matrix.layout_arch }} ^
             --copy dist\python-${{ env.PY_VER }}-${{ matrix.name }} ^
-            --include-pip --include-idle --include-tcltk --include-venv --include-underpth --include-dev
+            --include-pip --include-idle --include-tcltk --include-venv --include-underpth --include-dev --include-tests
 
       # ---------------------------------------------------------------
-      # 8) 打包为 zip 并上传产物
-      #    优先打包 layout 产物；若 layout 失败则退回原始 PCbuild 输出。
+      # 8) 打包为 zip：优先打包 layout 产物，失败则退回原始 PCbuild 输出
       # ---------------------------------------------------------------
-      - name: Package & upload artifact
+      - name: Package (7-Zip)
         shell: pwsh
         working-directory: ${{ env.SRC_DIR }}
         run: |
+          $ErrorActionPreference = 'Stop'
           $Env:PATH += ";C:\Program Files\7-Zip"
-          $artifact = "python-$($env:PY_VER)-${{ matrix.name }}.zip"
-          $layout = "dist\python-$($env:PY_VER)-${{ matrix.name }}"
+          $artifact = "python-${{ env.PY_VER }}-${{ matrix.name }}.zip"
+          $layout   = "dist\python-${{ env.PY_VER }}-${{ matrix.name }}"
           $src = if (Test-Path $layout) { $layout } else { "PCbuild\${{ matrix.outdir }}" }
           Write-Host "Packaging from: $src"
-          & 7z a -tzip $artifact $src
+          & 7z a -tzip $artifact "$src\*"
+          if (-not (Test-Path $artifact)) { throw "zip not created" }
 
+      # ---------------------------------------------------------------
+      # 9) 失败时上传编译日志，便于排查
+      # ---------------------------------------------------------------
+      - name: Upload build log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: buildlog-${{ env.PY_VER }}-${{ matrix.name }}
+          path: ${{ env.SRC_DIR }}/build-${{ matrix.name }}.log
+          retention-days: 7
+
+      # ---------------------------------------------------------------
+      # 10) 上传最终产物
+      # ---------------------------------------------------------------
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
