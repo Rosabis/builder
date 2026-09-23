@@ -3,9 +3,12 @@
 # 使用：把本文件放到你的仓库 .github/workflows/ 目录下（文件名随意，例如 build-windows.yml），
 #       然后在 GitHub Actions 页面手动触发（workflow_dispatch）或按下方触发条件自动运行。
 #
-# 设计：直接复用 Eden 官方 CI 脚本（.ci/windows/build.sh + package.sh + install-vulkan-sdk.ps1），
-#       仅在此之上自动安装 GitHub runner 缺省的工具链（Ninja / Qt6 / Vulkan SDK / MSVC / Python）。
-#       这样能正确覆盖 Deps.md 的全部 Windows 依赖（含 Vulkan SDK 与 libusb）。
+# 设计：Eden 真正的构建脚本在独立仓库 Eden-CI/Workflow（Build.md 第195行指明），
+#       而 eden 仓库内的 .ci/ 只有 actool.sh / android / license-header.sh，并没有 windows/build.sh。
+#       因此本工作流不调用其 CI 框架，而是按 Build.md「自己写一份 CMake 构建」的建议，
+#       并严格对齐 Eden-CI/Workflow 的 .ci/build/configure.sh + platform.sh 的 Windows 开关
+#       （LTO 关、Qt/SDL3/SDL2/FFmpeg/OpenSSL/Sirit 走 bundled）。在其上自动安装 GitHub runner
+#       缺省的工具链（Ninja / Qt6 / Vulkan SDK / MSVC / Python），完整覆盖 Deps.md 的 Windows 依赖。
 #
 # 注意：
 #  - 完整编译较慢（首次 1~3 小时，取决于 CPM/vcpkg 依赖下载），已设 6 小时超时。
@@ -50,7 +53,7 @@ jobs:
           echo "EDEN_REV=$(git rev-parse --short HEAD)" >> "$GITHUB_ENV"
 
       # ------------------------------------------------------------------
-      # 2) 安装 Ninja（GitHub Windows runner 默认不含 ninja，build.sh 需要）
+      # 2) 安装 Ninja（GitHub Windows runner 默认不含 ninja，cmake -G Ninja 需要）
       # ------------------------------------------------------------------
       - name: Install Ninja
         shell: pwsh
@@ -119,8 +122,8 @@ jobs:
             ${{ runner.os }}-eden-deps-
 
       # ------------------------------------------------------------------
-      # 8) 配置 + 编译（复用官方 .ci/windows/build.sh）
-      #    需提供：WINDEPLOYQT 路径、Qt 的 CMAKE_PREFIX_PATH、Qt bin 在 PATH。
+      # 8) 配置 + 编译（直接调用 cmake，开关对齐 Eden-CI/Workflow 的 Windows 分支）
+      #    需提供：Qt6 的 CMAKE_PREFIX_PATH、Qt bin 在 PATH（VULKAN_SDK 已由步骤5写入）。
       # ------------------------------------------------------------------
       - name: Configure & Build
         shell: bash
@@ -129,37 +132,74 @@ jobs:
           set -euxo pipefail
 
           # install-qt-action@v4 注入的是 QT_ROOT_DIR（形如 .../6.9.0/msvc2022_64），
-          # 不再自动设置 Qt6_DIR，需在此自行反推 Qt6 的 CMake 目录与 windeployqt 路径。
+          # 不再自动设置 Qt6_DIR，需在此反推 Qt6 的 CMake 目录。
           export Qt6_DIR="${QT_ROOT_DIR}/lib/cmake/Qt6"
           QT_BIN="${QT_ROOT_DIR}/bin"
           export PATH="$PATH:$QT_BIN"
-          export WINDEPLOYQT="$QT_BIN/windeployqt.exe"
           export CMAKE_PREFIX_PATH="$Qt6_DIR"
 
-          # DEVEL=false 关闭更新检查器（避免额外网络依赖）
-          DEVEL=false ./.ci/windows/build.sh
+          # 严格对齐 Eden-CI/Workflow/.ci/build/configure.sh + platform.sh（Windows 分支）
+          # platform.sh: VCINSTALLDIR 存在时 LTO=off、QT=ON、STATIC=ON、OpenSSL/SDL/FFmpeg/Sirit=bundled
+          # 此处改用共享 Qt（STATIC_BUILD=OFF），因为我们装的是系统共享版 Qt 6.9.0。
+          CMAKE_FLAGS=(
+            -G Ninja
+            -DBUILD_TESTING=OFF
+            -DCMAKE_BUILD_TYPE=Release
+            -DYUZU_USE_BUNDLED_QT=OFF
+            -DYUZU_USE_QT_MULTIMEDIA=OFF
+            -DYUZU_USE_QT_WEB_ENGINE=OFF
+            -DENABLE_QT_TRANSLATION=ON
+            -DENABLE_UPDATE_CHECKER=OFF
+            -DUSE_CCACHE=OFF
+            -DUSE_DISCORD_PRESENCE=ON
+            -DENABLE_LTO=OFF
+            -DYUZU_USE_BUNDLED_SIRIT=ON
+            -DYUZU_USE_BUNDLED_FFMPEG=ON
+            -DYUZU_DISABLE_LLVM=ON
+            -DYUZU_STATIC_BUILD=OFF
+            -DYUZU_USE_BUNDLED_OPENSSL=ON
+            -DYUZU_USE_BUNDLED_SDL3=ON
+            -DYUZU_USE_BUNDLED_SDL2=ON
+            -DYUZU_ROOM_STANDALONE=OFF
+            -DNIGHTLY_BUILD=OFF
+          )
+
+          cmake -S . -B build "${CMAKE_FLAGS[@]}"
+
+          # 编译主程序（BUILD_TESTING=OFF，不会编测试）；Ninja 默认并行
+          cmake --build build --target eden --parallel
 
       # ------------------------------------------------------------------
-      # 9) 打包（复用官方 .ci/windows/package.sh）
-      #    需要 7-Zip；官方脚本用 7z 压缩，这里把 Qt bin 与 7-Zip 加入 PATH。
-      #    ARCH 仅用于产物命名。
+      # 9) 打包：windeployqt 收集 Qt 依赖 + 复制 Vulkan 加载器与 MSVC 运行库，再用 7z 压缩
       # ------------------------------------------------------------------
       - name: Package artifacts
         shell: bash
         working-directory: ${{ github.workspace }}/eden
-        env:
-          ARCH: x86_64
         run: |
           set -euxo pipefail
 
-          # 与构建步骤一致，先从 QT_ROOT_DIR 反推 Qt bin 目录
-          export Qt6_DIR="${QT_ROOT_DIR}/lib/cmake/Qt6"
           QT_BIN="${QT_ROOT_DIR}/bin"
           export PATH="$PATH:$QT_BIN:C:/Program Files/7-Zip"
 
-          ./.ci/windows/package.sh
+          # 收集 Qt 运行时/插件到 build/bin（--no-compiler-runtime 避免去拉 VC _redist）
+          "$QT_BIN/windeployqt.exe" --release --no-translations --no-compiler-runtime build/bin/eden.exe || true
 
-          ls -lh artifacts/
+          # 复制 Vulkan 加载器（目标机可能未装 Vulkan 驱动）
+          if [ -f "$VULKAN_SDK/Bin/vulkan-1.dll" ]; then
+            cp "$VULKAN_SDK/Bin/vulkan-1.dll" build/bin/
+          fi
+
+          # 复制 MSVC 运行库（STATIC_BUILD=OFF，eden.exe 动态链接 CRT）
+          for dll in vcruntime140.dll msvcp140.dll concrt140.dll; do
+            if [ -f "/c/Windows/System32/$dll" ]; then
+              cp "/c/Windows/System32/$dll" build/bin/
+            fi
+          done
+
+          ARTIFACT="Eden-Windows-${EDEN_REV}.zip"
+          ( cd build/bin && 7z a -tzip "../../$ARTIFACT" ./* )
+          echo "ARTIFACT=$ARTIFACT" >> "$GITHUB_ENV"
+          ls -lh "$ARTIFACT"
 
       # ------------------------------------------------------------------
       # 10) 上传产物
@@ -168,5 +208,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: eden-windows
-          path: ${{ github.workspace }}/eden/artifacts/*
+          path: ${{ github.workspace }}/eden/Eden-Windows-*.zip
           retention-days: 14
