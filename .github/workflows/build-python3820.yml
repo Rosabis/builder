@@ -135,7 +135,7 @@ jobs:
           tar -xf src.tar.xz
           # 备选方案（若 runner 的 tar 不支持 xz）：改用 7-Zip 两步解包
           # & "C:\Program Files\7-Zip\7z.exe" x src.tar.xz -y
-          # & "C:\Program Files\7-Zip\7z.exe" x Python-$($env:PYTHON_VERSION).tar -y
+          # & "C:\Program Files\7-Zip\7z.exe" x $($env:SRC_DIR).tar -y
 
       # ---------------------------------------------------------------
       # 3.5) 单独拉取外部依赖（OpenSSL / Tcl-Tk / sqlite / libffi / expat）
