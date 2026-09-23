@@ -57,10 +57,8 @@ on:
   push:
     branches: [main, master]
 
-# 防止同架构并发运行占用额度；两个架构各跑一个 group，互不取消、并行执行
-concurrency:
-  group: cpython-build-${{ matrix.name }}
-  cancel-in-progress: false
+# 说明：两个架构通过 matrix 各自成为独立 job，本就并行执行、互不取消，
+#       因此无需额外配置 concurrency（其 group 表达式也不支持引用 matrix）。
 
 jobs:
   build:
