@@ -91,6 +91,20 @@ jobs:
           call Tools\msi\get_externals.bat
           if errorlevel 1 exit /b 1
 
+      # 安装包里的 doc.msi 要引用 Doc/build/html。源码 tarball 不含编好的文档，
+      # 缺了它 WiX 会报 LGHT0094: Unresolved reference to symbol 'WixComponentGroup:doc_html'。
+      - name: Build HTML documentation
+        timeout-minutes: 40
+        shell: pwsh
+        working-directory: ${{ env.SRC_DIR }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          python -m pip install -r Doc/requirements.txt
+          if ($LASTEXITCODE -ne 0) { throw "pip install docs deps failed" }
+          & cmd.exe /c "Doc\make.bat html"
+          if ($LASTEXITCODE -ne 0) { throw "doc build failed: $LASTEXITCODE" }
+          if (-not (Test-Path "Doc\build\html\index.html")) { throw "Doc/build/html/index.html missing" }
+
       - name: Set up MSVC (${{ matrix.msvc }})
         uses: ilammy/msvc-dev-cmd@v1
         with:
