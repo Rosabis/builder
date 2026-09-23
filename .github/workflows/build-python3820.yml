@@ -2,19 +2,21 @@
 # 用途：自动下载指定版本的 CPython 源码，在 GitHub Actions 上分别编译
 #       32 位（Win32）与 64 位（x64）版本，并打包上传产物。
 #
-# 自定义方式（只改最下方 env: 里的变量即可）：
-#   PYTHON_VERSION     要编译的版本号，例如 3.8.20 / 3.11.16 / 3.12.7
-#                     下载地址与产物名都由它推导，目录固定为 Python-<版本>。
-#   PYTHON_URL        可选：直接写完整 tarball 地址覆盖上面的推导，例如
-#                     https://www.python.org/ftp/python/3.11.16/Python-3.11.16.tar.xz
-#                     留空则按 PYTHON_VERSION 自动拼 https://www.python.org/ftp/python/<ver>/Python-<ver>.tar.xz
-#   PYTHON_MD5        可选：填官方 MD5 则在下载后校验完整性；留空跳过校验。
-#   BUILD_HOST_PYTHON 用于跑构建辅助脚本的“构建主机” Python 版本（默认 3.12，
-#                     能覆盖 3.8+ 的编译；编译 3.13 时可改成 3.13）。
+# 自定义方式（推荐在 Actions 页面手动运行时填写参数）：
+#   python_version       要编译的版本号，例如 3.8.20 / 3.11.16 / 3.12.7
+#                       下载地址与产物名都由它推导，目录固定为 Python-<版本>。
+#   python_url          可选：直接写完整 tarball 地址覆盖上面的推导，例如
+#                       https://www.python.org/ftp/python/3.11.16/Python-3.11.16.tar.xz
+#                       留空则按 python_version 自动拼
+#                       https://www.python.org/ftp/python/<ver>/Python-<ver>.tar.xz
+#   python_md5          可选：填官方 MD5 则在下载后校验完整性；留空跳过校验。
+#   build_host_python   用于跑构建辅助脚本的“构建主机” Python 版本（默认 3.12，
+#                       能覆盖 3.8+ 的编译；编译 3.13 时可改成 3.13）。
 #
 # 使用：
 #   1. 把本文件放到 .github/workflows/ 目录（文件名随意）。
-#   2. 推送到仓库后，在 Actions 页面点击 “Run workflow” 手动触发（已配 workflow_dispatch）。
+#   2. 推送到仓库后，在 Actions 页面点击 “Run workflow” 手动触发，
+#      在弹出的表单里填版本号等参数。
 #   3. 构建完成后，在 Artifacts 中下载 python-<版本>-win32.zip / python-<版本>-amd64.zip。
 #
 # 说明：
@@ -26,18 +28,34 @@
 
 name: Build CPython (Windows x86/x64)
 
-# ───────────────────────── 在这里切换版本 ─────────────────────────
-env:
-  PYTHON_VERSION: "3.8.20"
-  PYTHON_URL: ""
-  PYTHON_MD5: ""
-  BUILD_HOST_PYTHON: "3.12"
-# ──────────────────────────────────────────────────────────────────
-
 on:
-  workflow_dispatch:            # 允许在 Actions 页面手动触发
+  # 手动触发：在 Actions 页面弹出表单，输入版本号等参数
+  workflow_dispatch:
+    inputs:
+      python_version:
+        description: "要编译的 CPython 版本，例如 3.8.20 / 3.11.16"
+        required: true
+        default: "3.8.20"
+        type: string
+      python_url:
+        description: "源码 tarball 完整地址（留空则按版本自动推导）"
+        required: false
+        default: ""
+        type: string
+      python_md5:
+        description: "可选 MD5 校验值（留空跳过校验）"
+        required: false
+        default: ""
+        type: string
+      build_host_python:
+        description: "构建主机 Python 版本（默认 3.12）"
+        required: false
+        default: "3.12"
+        type: string
+
+  # 推送到主分支时自动构建（使用 env 里的默认值）
   push:
-    branches: [ main, master ] # 推送到主分支时自动构建
+    branches: [main, master]
 
 # 防止同架构并发运行占用额度；两个架构各跑一个 group，互不取消、并行执行
 concurrency:
@@ -48,6 +66,14 @@ jobs:
   build:
     runs-on: windows-2022
     timeout-minutes: 180
+
+    # 手动触发时优先使用输入参数；自动 push 触发时回退到默认值
+    env:
+      PYTHON_VERSION: ${{ github.event.inputs.python_version || '3.8.20' }}
+      PYTHON_URL: ${{ github.event.inputs.python_url || '' }}
+      PYTHON_MD5: ${{ github.event.inputs.python_md5 || '' }}
+      BUILD_HOST_PYTHON: ${{ github.event.inputs.build_host_python || '3.12' }}
+
     strategy:
       fail-fast: false
       matrix:
