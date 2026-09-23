@@ -61,14 +61,15 @@ jobs:
           # windows-2022 自带的 tar.exe 解 .tar.xz 会无输出挂死，改用 runner 自带的 7-Zip。
           $seven = "C:\Program Files\7-Zip\7z.exe"
           if (-not (Test-Path $seven)) { throw "7z not found: $seven" }
-          $tarName = "${{ env.SRC_DIR }}.tar"
-          Write-Host "7z extract xz -> $tarName"
+          # 7z 按压缩包文件名去后缀，src.tar.xz 解出的是 src.tar
+          Write-Host "7z extract xz -> src.tar"
           & $seven x src.tar.xz -y
           if ($LASTEXITCODE -ne 0) { throw "7z xz extract failed: $LASTEXITCODE" }
+          if (-not (Test-Path "src.tar")) { throw "src.tar not found after xz extract" }
           Write-Host "7z extract tar"
-          & $seven x $tarName -y
+          & $seven x src.tar -y
           if ($LASTEXITCODE -ne 0) { throw "7z tar extract failed: $LASTEXITCODE" }
-          Remove-Item $tarName -Force
+          Remove-Item src.tar -Force
           if (-not (Test-Path "${{ env.SRC_DIR }}")) { throw "Extract failed: ${{ env.SRC_DIR }} not found" }
           Write-Host "Extracted ${{ env.SRC_DIR }}"
 
